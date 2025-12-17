@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database untuk persistensi
+  storage:
+    image: postgres:16-alpine
+    container_name: uas-storage
+    environment:
+      POSTGRES_DB: logdb
+      POSTGRES_USER: loguser
+      POSTGRES_PASSWORD: logpass123
+      POSTGRES_INITDB_ARGS: "-E UTF8"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"  # Exposed untuk debugging, bisa dihapus di production
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loguser -d logdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - uas-network
+    restart: unless-stopped
+
+  # Redis Broker untuk message queue
+  broker:
+    image: redis:7-alpine
+    container_name: uas-broker
+    command: redis-server --appendonly yes
+    volumes:
+      - broker_data:/data
+    ports:
+      - "6379:6379"  # Exposed untuk debugging
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - uas-network
+    restart: unless-stopped
+
+  # Aggregator Service - API & Consumer
+  aggregator:
+    build:
+      context: ./aggregator
+      dockerfile: Dockerfile
+    container_name: uas-aggregator
+    image: uas-aggregator:latest
+    depends_on:
+      storage:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://loguser:logpass123@storage:5432/logdb
+      - REDIS_URL=redis://broker:6379
+      - WORKER_COUNT=4
+      - LOG_LEVEL=INFO
+    ports:
+      - "8080:8080"
+    volumes:
+      - aggregator_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - uas-network
+    restart: unless-stopped
+
+  # Publisher Service - Event Generator
+  publisher:
+    build:
+      context: ./publisher
+      dockerfile: Dockerfile
+    container_name: uas-publisher
+    image: uas-publisher:latest
+    depends_on:
+      aggregator:
+        condition: service_healthy
+    environment:
+      - AGGREGATOR_URL=http://aggregator:8080
+      - BATCH_SIZE=100
+      - DUPLICATE_RATE=0.3
+      - TOTAL_EVENTS=20000
+      - DELAY_BETWEEN_BATCHES=0.5
+    networks:
+      - uas-network
+    restart: "no"  # Run once
+
+networks:
+  uas-network:
+    driver: bridge
+    name: uas-network
+
+volumes:
+  pg_data:
+    name: uas_pg_data
+    driver: local
+  broker_data:
+    name: uas_broker_data
+    driver: local
+  aggregator_logs:
+    name: uas_aggregator_logs
+    driver: local
