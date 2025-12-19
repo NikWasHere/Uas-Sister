@@ -5,6 +5,7 @@ Mendukung transaksi ACID dan kontrol konkurensi untuk mencegah race conditions
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 from contextlib import asynccontextmanager
@@ -13,7 +14,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 import redis.asyncio as redis
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, UniqueConstraint, Index
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, UniqueConstraint, Index, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.dialects.postgresql import insert
@@ -147,7 +148,7 @@ def init_database():
             
             # Test connection
             with engine.connect() as conn:
-                conn.execute("SELECT 1")
+                conn.execute(text("SELECT 1"))
             
             # Create tables
             Base.metadata.create_all(engine)
@@ -175,7 +176,7 @@ def init_database():
         except Exception as e:
             logger.error(f"Database connection attempt {attempt + 1}/{max_retries} failed: {e}")
             if attempt < max_retries - 1:
-                asyncio.sleep(retry_delay)
+                time.sleep(retry_delay)
                 retry_delay *= 2
             else:
                 raise
@@ -248,7 +249,7 @@ def process_event_with_transaction(event: Event) -> tuple[bool, str]:
         
         # Increment received counter (atomic)
         session.execute(
-            "UPDATE event_stats SET received_count = received_count + 1, updated_at = NOW() WHERE id = 1"
+            text("UPDATE event_stats SET received_count = received_count + 1, updated_at = NOW() WHERE id = 1")
         )
         
         # Attempt to insert event (idempotent operation)
@@ -273,7 +274,7 @@ def process_event_with_transaction(event: Event) -> tuple[bool, str]:
         if result.rowcount > 0:
             # New event, update unique processed counter
             session.execute(
-                "UPDATE event_stats SET unique_processed = unique_processed + 1, updated_at = NOW() WHERE id = 1"
+                text("UPDATE event_stats SET unique_processed = unique_processed + 1, updated_at = NOW() WHERE id = 1")
             )
             session.commit()
             logger.info(f"✓ Processed new event: topic={event.topic}, event_id={event.event_id}")
@@ -281,7 +282,7 @@ def process_event_with_transaction(event: Event) -> tuple[bool, str]:
         else:
             # Duplicate event, update duplicate counter
             session.execute(
-                "UPDATE event_stats SET duplicate_dropped = duplicate_dropped + 1, updated_at = NOW() WHERE id = 1"
+                text("UPDATE event_stats SET duplicate_dropped = duplicate_dropped + 1, updated_at = NOW() WHERE id = 1")
             )
             session.commit()
             logger.info(f"⊗ Dropped duplicate event: topic={event.topic}, event_id={event.event_id}")
@@ -293,7 +294,7 @@ def process_event_with_transaction(event: Event) -> tuple[bool, str]:
         # Update duplicate counter
         try:
             session.execute(
-                "UPDATE event_stats SET duplicate_dropped = duplicate_dropped + 1, updated_at = NOW() WHERE id = 1"
+                text("UPDATE event_stats SET duplicate_dropped = duplicate_dropped + 1, updated_at = NOW() WHERE id = 1")
             )
             session.commit()
         except:
@@ -493,7 +494,7 @@ async def health_check():
     try:
         Session = app_state["Session"]
         session = Session()
-        session.execute("SELECT 1")
+        session.execute(text("SELECT 1"))
         session.close()
         health_status["database"] = "connected"
     except Exception as e:
